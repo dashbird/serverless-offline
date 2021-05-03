@@ -1067,7 +1067,7 @@ export default class HttpServer {
     serverlessLog('Routes defined in resources:')
 
     Object.entries(resourceRoutes).forEach(([methodId, resourceRoutesObj]) => {
-      const { isProxy, method, pathResource, proxyUri } = resourceRoutesObj
+      const { isProxy, method, pathResource, proxyUri, headers } = resourceRoutesObj
 
       if (!isProxy) {
         serverlessLog(
@@ -1145,6 +1145,12 @@ export default class HttpServer {
             `PROXY ${request.method} ${request.url.pathname} -> ${resultUri}`,
           )
 
+          if (headers) {
+            return h.proxy({
+              passThrough: true,
+              mapUri: () => ({ uri: resultUri, headers })
+            })
+          }
           return h.proxy({
             passThrough: true,
             uri: resultUri,

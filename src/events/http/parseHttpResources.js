@@ -46,6 +46,17 @@ const { entries, fromEntries, keys } = Object
    return elems.join(glue)
  }
 
+ function parseHeaders(requestParameters = {}) {
+  const headers = {}
+  Object.keys(requestParameters).map(key => {
+    if (key.includes('header')) {
+      const [_, name] = key.split('.')
+      headers[name] = requestParameters[key]
+    }
+  })
+  return Object.keys(headers).length > 0 && headers
+}
+
  function constructHapiInterface(integrationObjects, routeObjects, routeId) {
    // returns all info necessary so that routes can be added in index.js
    const routeObject = routeObjects[routeId]
@@ -59,11 +70,14 @@ const { entries, fromEntries, keys } = Object
 
    const routeKey = routeObject.Properties.RouteKey
    const [method, pathResource] = routeKey.split(' ')
+   const headers = parseHeaders(Integration.Properties.RequestParameters)
+
    return {
      isProxy: !!proxyUri,
      method,
      pathResource,
      proxyUri,
+     headers,
    }
  }
 
