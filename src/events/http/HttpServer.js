@@ -15,6 +15,7 @@ import {
   VelocityContext,
 } from './lambda-events/index.js'
 import parseResources from './parseResources.js'
+import parseHttpResources from './parseHttpResources.js'
 import payloadSchemaValidator from './payloadSchemaValidator.js'
 import debugLog from '../../debugLog.js'
 import serverlessLog, { logRoutes } from '../../serverlessLog.js'
@@ -1054,7 +1055,9 @@ export default class HttpServer {
       return
     }
 
-    const resourceRoutes = parseResources(this.#serverless.service.resources)
+    const resourceRoutes = resourceRoutesOptions.type === 'httpApi'
+      ? parseHttpResources(this.#serverless.service.resources)
+      : parseResources(this.#serverless.service.resources)
 
     if (!resourceRoutes || !Object.keys(resourceRoutes).length) {
       return
