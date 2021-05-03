@@ -81,7 +81,8 @@ export default class ServerlessOffline {
 
     const eventModules = []
 
-    if (httpEvents.length > 0) {
+    const forceEvents = this.#options.resourceRoutes && this.#options.resourceRoutes.force
+    if (httpEvents.length > 0 || forceEvents) {
       eventModules.push(this._createHttp(httpEvents))
     }
 
