@@ -1,0 +1,36 @@
+service: authorizer-websocket-tests
+
+configValidationMode: error
+deprecationNotificationMode: error
+
+plugins:
+  - ../../../src/index.js
+
+provider:
+  architecture: arm64
+  deploymentMethod: direct
+  memorySize: 1024
+  name: aws
+  region: us-east-1
+  runtime: nodejs18.x
+  stage: dev
+  versionFunctions: false
+
+functions:
+  authorizer:
+    handler: src/authorizer.authorizerAsyncFunction
+  handler:
+    events:
+      - http:
+          method: get
+          path: echo
+      - websocket:
+          authorizer: authorizer
+          route: $connect
+      - websocket:
+          route: $disconnect
+      - websocket:
+          route: $default
+          # Enable 2-way comms
+          routeResponseSelectionExpression: $default
+    handler: src/handler.handler

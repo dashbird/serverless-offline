@@ -1,37 +1,70 @@
-import { Server } from 'ws'
-import debugLog from '../../debugLog.js'
-import serverlessLog from '../../serverlessLog.js'
+import { log } from '@serverless/utils/log.js'
+import { WebSocketServer as WsWebSocketServer } from 'ws'
 import { createUniqueId } from '../../utils/index.js'
 
 export default class WebSocketServer {
+  #connectionIds = new Map()
+
   #options = null
+
+  #sharedServer = null
+
   #webSocketClients = null
 
   constructor(options, webSocketClients, sharedServer) {
     this.#options = options
+    this.#sharedServer = sharedServer
     this.#webSocketClients = webSocketClients
+  }
 
-    const server = new Server({
-      server: sharedServer,
+  async createServer() {
+    const server = new WsWebSocketServer({
+      server: this.#sharedServer,
+      verifyClient: async ({ req }, cb) => {
+        const connectionId = createUniqueId()
+        const key = req.headers['sec-websocket-key']
+
+        log.debug(`verifyClient:${key} ${connectionId}`)
+
+        // use the websocket key to correlate connection IDs
+        this.#connectionIds.set(key, connectionId)
+
+        const { headers, message, statusCode, verified } =
+          await this.#webSocketClients.verifyClient(connectionId, req)
+
+        try {
+          if (!verified) {
+            cb(false, statusCode, message, headers)
+            return
+          }
+          cb(true)
+        } catch (err) {
+          log.debug(`Error verifying`, err)
+          cb(false)
+        }
+      },
     })
 
     server.on('connection', (webSocketClient, request) => {
-      console.log('received connection')
+      log.notice('received connection')
 
-      const connectionId = createUniqueId()
+      const { headers } = request
+      const key = headers['sec-websocket-key']
 
-      debugLog(`connect:${connectionId}`)
+      const connectionId = this.#connectionIds.get(key)
 
-      this.#webSocketClients.addClient(webSocketClient, request, connectionId)
+      log.debug(`connect:${connectionId}`)
+
+      this.#webSocketClients.addClient(webSocketClient, connectionId)
     })
   }
 
   async start() {
     const { host, httpsProtocol, websocketPort } = this.#options
 
-    serverlessLog(
-      `Offline [websocket] listening on ws${
-        httpsProtocol ? 's' : ''
+    log.notice(
+      `Offline [websocket] listening on ${
+        httpsProtocol ? 'wss' : 'ws'
       }://${host}:${websocketPort}`,
     )
   }
@@ -40,7 +73,6 @@ export default class WebSocketServer {
   stop() {}
 
   addRoute(functionKey, webSocketEvent) {
-    this.#webSocketClients.addRoute(functionKey, webSocketEvent.route)
-    // serverlessLog(`route '${route}'`)
+    this.#webSocketClients.addRoute(functionKey, webSocketEvent)
   }
 }

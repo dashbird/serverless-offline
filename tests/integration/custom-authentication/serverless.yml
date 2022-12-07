@@ -1,0 +1,29 @@
+service: integration-tests
+
+configValidationMode: error
+deprecationNotificationMode: error
+
+custom:
+  offline:
+    customAuthenticationProvider: './src/authenticationProvider'
+
+plugins:
+  - ../../../src/index.js
+
+provider:
+  architecture: arm64
+  deploymentMethod: direct
+  memorySize: 1024
+  name: aws
+  region: us-east-1
+  runtime: nodejs18.x
+  stage: dev
+  versionFunctions: false
+
+functions:
+  echo:
+    events:
+      - httpApi:
+          method: get
+          path: /echo
+    handler: src/handler.echo

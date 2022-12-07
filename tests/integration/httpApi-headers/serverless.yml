@@ -1,0 +1,30 @@
+service: httpapi-headers
+
+configValidationMode: error
+deprecationNotificationMode: error
+
+plugins:
+  - ../../../src/index.js
+
+provider:
+  architecture: arm64
+  deploymentMethod: direct
+  httpApi:
+    payload: '2.0'
+  memorySize: 1024
+  name: aws
+  region: us-east-1
+  runtime: nodejs18.x
+  stage: dev
+  versionFunctions: false
+
+functions:
+  echoHeaders:
+    events:
+      - httpApi:
+          method: get
+          path: /echo-headers
+      - httpApi:
+          method: post
+          path: /echo-headers
+    handler: src/handler.echoHeaders

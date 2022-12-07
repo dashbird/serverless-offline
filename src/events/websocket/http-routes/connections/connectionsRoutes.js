@@ -1,18 +1,11 @@
+import { log } from '@serverless/utils/log.js'
 import ConnectionsController from './ConnectionsController.js'
-import debugLog from '../../../../debugLog.js'
 
 export default function connectionsRoutes(webSocketClients) {
   const connectionsController = new ConnectionsController(webSocketClients)
 
   return [
     {
-      method: 'POST',
-      options: {
-        payload: {
-          parse: false,
-        },
-      },
-      path: '/@connections/{connectionId}',
       async handler(request, h) {
         const {
           params: { connectionId },
@@ -20,7 +13,7 @@ export default function connectionsRoutes(webSocketClients) {
           url,
         } = request
 
-        debugLog(`got POST to ${url}`)
+        log.debug(`got POST to ${url}`)
 
         const clientExisted = await connectionsController.send(
           connectionId,
@@ -31,27 +24,28 @@ export default function connectionsRoutes(webSocketClients) {
           return h.response(null).code(410)
         }
 
-        debugLog(`sent data to connection:${connectionId}`)
+        log.debug(`sent data to connection:${connectionId}`)
 
         return null
       },
-    },
 
-    {
-      method: 'DELETE',
+      method: 'POST',
       options: {
         payload: {
           parse: false,
         },
       },
       path: '/@connections/{connectionId}',
+    },
+
+    {
       handler(request, h) {
         const {
           params: { connectionId },
           url,
         } = request
 
-        debugLog(`got DELETE to ${url}`)
+        log.debug(`got DELETE to ${url}`)
 
         const clientExisted = connectionsController.remove(connectionId)
 
@@ -59,10 +53,18 @@ export default function connectionsRoutes(webSocketClients) {
           return h.response(null).code(410)
         }
 
-        debugLog(`closed connection:${connectionId}`)
+        log.debug(`closed connection:${connectionId}`)
 
         return h.response(null).code(204)
       },
+
+      method: 'DELETE',
+      options: {
+        payload: {
+          parse: false,
+        },
+      },
+      path: '/@connections/{connectionId}',
     },
   ]
 }

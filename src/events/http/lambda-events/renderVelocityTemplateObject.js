@@ -1,15 +1,16 @@
-import { Compile, parse } from 'velocityjs'
+import { log } from '@serverless/utils/log.js'
+import velocityjs from 'velocityjs'
 import runInPollutedScope from '../javaHelpers.js'
-import debugLog from '../../../debugLog.js'
 import { isPlainObject } from '../../../utils/index.js'
 
+const { parse } = JSON
 const { entries } = Object
 
 function tryToParseJSON(string) {
   let parsed
   try {
-    parsed = JSON.parse(string)
-  } catch (err) {
+    parsed = parse(string)
+  } catch {
     // nothing! Some things are not meant to be parsed.
   }
 
@@ -23,14 +24,12 @@ function renderVelocityString(velocityString, context) {
     // Quick args explanation:
     // { escape: false } --> otherwise would escape &, < and > chars with html (&amp;, &lt; and &gt;)
     // render(context, null, true) --> null: no custom macros; true: silent mode, just like APIG
-    new Compile(parse(velocityString), { escape: false }).render(
-      context,
-      null,
-      true,
-    ),
+    new velocityjs.Compile(velocityjs.parse(velocityString), {
+      escape: false,
+    }).render(context, null, true),
   )
 
-  debugLog('Velocity rendered:', renderResult || 'undefined')
+  log.debug('Velocity rendered:', renderResult || 'undefined')
 
   // Haaaa Velocity... this language sure loves strings a lot
   switch (renderResult) {
@@ -57,6 +56,7 @@ function renderVelocityString(velocityString, context) {
 */
 export default function renderVelocityTemplateObject(templateObject, context) {
   const result = {}
+
   let toProcess = templateObject
 
   // In some projects, the template object is a string, let us see if it's JSON
@@ -67,7 +67,7 @@ export default function renderVelocityTemplateObject(templateObject, context) {
   // Let's check again
   if (isPlainObject(toProcess)) {
     entries(toProcess).forEach(([key, value]) => {
-      debugLog('Processing key:', key, '- value:', value)
+      log.debug('Processing key:', key, '- value:', value)
 
       if (typeof value === 'string') {
         result[key] = renderVelocityString(value, context)

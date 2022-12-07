@@ -1,34 +1,47 @@
-import { platform } from 'os'
-import execa from 'execa'
-import fetch from 'node-fetch'
-import pRetry from 'p-retry'
-import { Lambda } from 'aws-sdk'
+import { createHash } from 'node:crypto'
+import { createWriteStream } from 'node:fs'
+import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { platform } from 'node:os'
+import { dirname, join, sep } from 'node:path'
+import { LambdaClient, GetLayerVersionCommand } from '@aws-sdk/client-lambda'
+import { log, progress } from '@serverless/utils/log.js'
+import { execa } from 'execa'
+import { ensureDir, pathExists } from 'fs-extra'
+import isWsl from 'is-wsl'
 import jszip from 'jszip'
-import { createWriteStream, unlinkSync } from 'fs'
-import { readFile, writeFile, ensureDir, pathExists } from 'fs-extra'
-import { dirname, join, sep } from 'path'
-import crypto from 'crypto'
+import pRetry from 'p-retry'
 import DockerImage from './DockerImage.js'
-import debugLog from '../../../debugLog.js'
-import { logLayers, logWarning } from '../../../serverlessLog.js'
 
 const { stringify } = JSON
-const { entries } = Object
-const { keys } = Object
+const { floor, log: mathLog } = Math
+const { parseFloat } = Number
+const { entries, hasOwn } = Object
 
 export default class DockerContainer {
   #containerId = null
+
   #dockerOptions = null
+
   #env = null
+
   #functionKey = null
+
   #handler = null
+
   #image = null
+
   #imageNameTag = null
-  #lambda = null
+
+  #lambdaClient = null
+
   #layers = null
+
   #port = null
+
   #provider = null
+
   #runtime = null
+
   #servicePath = null
 
   constructor(
@@ -41,26 +54,26 @@ export default class DockerContainer {
     servicePath,
     dockerOptions,
   ) {
+    this.#dockerOptions = dockerOptions
     this.#env = env
     this.#functionKey = functionKey
     this.#handler = handler
-    this.#imageNameTag = this._baseImage(runtime)
+    this.#imageNameTag = this.#baseImage(runtime)
     this.#image = new DockerImage(this.#imageNameTag)
-    this.#runtime = runtime
     this.#layers = layers
     this.#provider = provider
+    this.#runtime = runtime
     this.#servicePath = servicePath
-    this.#dockerOptions = dockerOptions
   }
 
-  _baseImage(runtime) {
+  #baseImage(runtime) {
     return `lambci/lambda:${runtime}`
   }
 
   async start(codeDir) {
     await this.#image.pull()
 
-    debugLog('Run Docker container...')
+    log.debug('Run Docker container...')
 
     let permissions = 'ro'
 
@@ -80,10 +93,10 @@ export default class DockerContainer {
     ]
 
     if (this.#layers.length > 0) {
-      logLayers(`Found layers, checking provider type`)
+      log.verbose(`Found layers, checking provider type`)
 
       if (this.#provider.name.toLowerCase() !== 'aws') {
-        logLayers(
+        log.warning(
           `Provider ${
             this.#provider.name
           } is Unsupported. Layers are only supported on aws.`,
@@ -95,30 +108,28 @@ export default class DockerContainer {
           layerDir = join(this.#servicePath, '.serverless-offline', 'layers')
         }
 
-        layerDir = join(layerDir, this._getLayersSha256())
+        layerDir = join(layerDir, this.#getLayersSha256())
 
         if (await pathExists(layerDir)) {
-          logLayers(
+          log.verbose(
             `Layers already exist for this function. Skipping download.`,
           )
         } else {
-          const layers = []
-
-          logLayers(`Storing layers at ${layerDir}`)
+          log.verbose(`Storing layers at ${layerDir}`)
 
           // Only initialise if we have layers, we're using AWS, and they don't already exist
-          this.#lambda = new Lambda({
+          this.#lambdaClient = new LambdaClient({
             apiVersion: '2015-03-31',
             region: this.#provider.region,
           })
 
-          logLayers(`Getting layers`)
+          log.verbose(`Getting layers`)
 
-          for (const layerArn of this.#layers) {
-            layers.push(this._downloadLayer(layerArn, layerDir))
-          }
-
-          await Promise.all(layers)
+          await Promise.all(
+            this.#layers.map((layerArn) =>
+              this.#downloadLayer(layerArn, layerDir),
+            ),
+          )
         }
 
         if (
@@ -138,11 +149,13 @@ export default class DockerContainer {
       dockerArgs.push('-e', `${key}=${value}`)
     })
 
-    if (platform() === 'linux') {
+    if (platform() === 'linux' && !isWsl) {
       // Add `host.docker.internal` DNS name to access host from inside the container
       // https://github.com/docker/for-linux/issues/264
-      const gatewayIp = await this._getBridgeGatewayIp()
-      dockerArgs.push('--add-host', `host.docker.internal:${gatewayIp}`)
+      const gatewayIp = await this.#getBridgeGatewayIp()
+      if (gatewayIp) {
+        dockerArgs.push('--add-host', `host.docker.internal:${gatewayIp}`)
+      }
     }
 
     if (this.#dockerOptions.network) {
@@ -162,8 +175,9 @@ export default class DockerContainer {
 
     await new Promise((resolve, reject) => {
       dockerStart.all.on('data', (data) => {
-        const str = data.toString()
-        console.log(str)
+        const str = String(data)
+        log.error(str)
+
         if (str.includes('Lambda API listening on port')) {
           resolve()
         }
@@ -201,7 +215,7 @@ export default class DockerContainer {
     this.#containerId = containerId
     this.#port = containerPort
 
-    await pRetry(() => this._ping(), {
+    await pRetry(() => this.#ping(), {
       // default,
       factor: 2,
       // milliseconds
@@ -211,91 +225,112 @@ export default class DockerContainer {
     })
   }
 
-  async _downloadLayer(layerArn, layerDir) {
-    const layerName = layerArn.split(':layer:')[1]
+  async #downloadLayer(layerArn, layerDir) {
+    const [, layerName] = layerArn.split(':layer:')
     const layerZipFile = `${layerDir}/${layerName}.zip`
+    const layerProgress = progress.get(`layer-${layerName}`)
 
-    logLayers(`[${layerName}] ARN: ${layerArn}`)
+    log.verbose(`[${layerName}] ARN: ${layerArn}`)
 
-    const params = {
-      Arn: layerArn,
-    }
+    log.verbose(`[${layerName}] Getting Info`)
+    layerProgress.notice(`Retrieving "${layerName}": Getting info`)
 
-    logLayers(`[${layerName}] Getting Info`)
-
-    let layer = null
+    const getLayerVersionCommand = new GetLayerVersionCommand({
+      LayerName: layerArn,
+    })
 
     try {
-      layer = await this.#lambda.getLayerVersionByArn(params).promise()
-    } catch (e) {
-      logWarning(`[${layerName}] ${e.code}: ${e.message}`)
-      return
-    }
+      let layer = null
 
-    if (
-      Object.prototype.hasOwnProperty.call(layer, 'CompatibleRuntimes') &&
-      !layer.CompatibleRuntimes.includes(this.#runtime)
-    ) {
-      logWarning(
-        `[${layerName}] Layer is not compatible with ${this.#runtime} runtime`,
+      try {
+        layer = await this.#lambdaClient.send(getLayerVersionCommand)
+      } catch (err) {
+        log.warning(`[${layerName}] ${err.code}: ${err.message}`)
+
+        return
+      }
+
+      if (
+        hasOwn(layer, 'CompatibleRuntimes') &&
+        !layer.CompatibleRuntimes.includes(this.#runtime)
+      ) {
+        log.warning(
+          `[${layerName}] Layer is not compatible with ${
+            this.#runtime
+          } runtime`,
+        )
+
+        return
+      }
+
+      const { CodeSize: layerSize, Location: layerUrl } = layer.Content
+      // const layerSha = layer.Content.CodeSha256
+
+      await ensureDir(layerDir)
+
+      log.verbose(
+        `Retrieving "${layerName}": Downloading ${this.#formatBytes(
+          layerSize,
+        )}...`,
       )
-      return
-    }
-
-    const layerUrl = layer.Content.Location
-    // const layerSha = layer.Content.CodeSha256
-
-    const layerSize = layer.Content.CodeSize
-
-    await ensureDir(layerDir)
-
-    logLayers(`[${layerName}] Downloading ${this._formatBytes(layerSize)}...`)
-
-    const res = await fetch(layerUrl, {
-      method: 'get',
-    })
-
-    if (!res.ok) {
-      logWarning(
-        `[${layerName}] Failed to fetch from ${layerUrl} with ${res.statusText}`,
+      layerProgress.notice(
+        `Retrieving "${layerName}": Downloading ${this.#formatBytes(
+          layerSize,
+        )}`,
       )
-      return
-    }
 
-    const fileStream = createWriteStream(`${layerZipFile}`)
-    await new Promise((resolve, reject) => {
-      res.body.pipe(fileStream)
-      res.body.on('error', (err) => {
-        reject(err)
-      })
-      fileStream.on('finish', () => {
-        resolve()
-      })
-    })
+      const res = await fetch(layerUrl)
 
-    logLayers(`[${layerName}] Unzipping to .layers directory`)
+      if (!res.ok) {
+        log.warning(
+          `[${layerName}] Failed to fetch from ${layerUrl} with ${res.statusText}`,
+        )
 
-    const data = await readFile(`${layerZipFile}`)
-    const zip = await jszip.loadAsync(data)
-    await Promise.all(
-      keys(zip.files).map(async (filename) => {
-        const fileData = await zip.files[filename].async('nodebuffer')
-        if (filename.endsWith(sep)) {
-          return Promise.resolve()
-        }
-        await ensureDir(join(layerDir, dirname(filename)))
-        return writeFile(join(layerDir, filename), fileData, {
-          mode: zip.files[filename].unixPermissions,
+        return
+      }
+
+      const fileStream = createWriteStream(layerZipFile)
+
+      await new Promise((resolve, reject) => {
+        res.body.pipe(fileStream)
+        res.body.on('error', (err) => {
+          reject(err)
         })
-      }),
-    )
+        fileStream.on('finish', () => {
+          resolve()
+        })
+      })
 
-    logLayers(`[${layerName}] Removing zip file`)
+      log.verbose(`Retrieving "${layerName}": Unzipping to .layers directory`)
+      layerProgress.notice(
+        `Retrieving "${layerName}": Unzipping to .layers directory`,
+      )
 
-    unlinkSync(`${layerZipFile}`)
+      const data = await readFile(layerZipFile)
+      const zip = await jszip.loadAsync(data)
+
+      await Promise.all(
+        entries(zip.files).map(async ([filename, jsZipObj]) => {
+          const fileData = await jsZipObj.async('nodebuffer')
+          if (filename.endsWith(sep)) {
+            return Promise.resolve()
+          }
+          await ensureDir(join(layerDir, dirname(filename)))
+          return writeFile(join(layerDir, filename), fileData, {
+            mode: zip.files[filename].unixPermissions,
+          })
+        }),
+      )
+
+      log.verbose(`[${layerName}] Removing zip file`)
+
+      await unlink(layerZipFile)
+    } finally {
+      layerProgress.remove()
+    }
   }
 
-  async _getBridgeGatewayIp() {
+  async #getBridgeGatewayIp() {
     let gateway
     try {
       ;({ stdout: gateway } = await execa('docker', [
@@ -306,13 +341,14 @@ export default class DockerContainer {
         '{{(index .IPAM.Config 0).Gateway}}',
       ]))
     } catch (err) {
-      console.error(err.stderr)
+      log.error(err.stderr)
+
       throw err
     }
     return gateway.split('/')[0]
   }
 
-  async _ping() {
+  async #ping() {
     const url = `http://${this.#dockerOptions.host}:${
       this.#port
     }/2018-06-01/ping`
@@ -349,29 +385,27 @@ export default class DockerContainer {
         await execa('docker', ['stop', this.#containerId])
         await execa('docker', ['rm', this.#containerId])
       } catch (err) {
-        console.error(err.stderr)
+        log.error(err.stderr)
+
         throw err
       }
     }
   }
 
-  _formatBytes(bytes, decimals = 2) {
+  #formatBytes(bytes, decimals = 2) {
     if (bytes === 0) return '0 Bytes'
 
     const k = 1024
     const dm = decimals < 0 ? 0 : decimals
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
 
-    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    const i = floor(mathLog(bytes) / mathLog(k))
 
     return `${parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`
   }
 
-  _getLayersSha256() {
-    return crypto
-      .createHash('sha256')
-      .update(JSON.stringify(this.#layers))
-      .digest('hex')
+  #getLayersSha256() {
+    return createHash('sha256').update(stringify(this.#layers)).digest('hex')
   }
 
   get isRunning() {

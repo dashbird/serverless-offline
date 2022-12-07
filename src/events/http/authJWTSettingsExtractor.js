@@ -1,18 +1,24 @@
-import serverlessLog from '../../serverlessLog.js'
+import { log } from '@serverless/utils/log.js'
+
+function buildFailureResult(warningMessage) {
+  log.warning(warningMessage)
+
+  return {
+    unsupportedAuth: true,
+  }
+}
+
+function buildSuccessResult(authorizerName) {
+  return {
+    authorizerName,
+  }
+}
 
 export default function authJWTSettingsExtractor(
   endpoint,
   provider,
   ignoreJWTSignature,
 ) {
-  const buildFailureResult = (warningMessage) => {
-    serverlessLog(warningMessage)
-
-    return { unsupportedAuth: true }
-  }
-
-  const buildSuccessResult = (authorizerName) => ({ authorizerName })
-
   const { authorizer } = endpoint
 
   if (!authorizer) {
@@ -30,33 +36,31 @@ export default function authJWTSettingsExtractor(
 
   if (!authorizer.name) {
     return buildFailureResult(
-      'WARNING: Serverless Offline supports only JWT authorizers referenced by name',
+      'Serverless Offline supports only JWT authorizers referenced by name',
     )
   }
 
   const httpApiAuthorizer = provider.httpApi.authorizers[authorizer.name]
 
   if (!httpApiAuthorizer) {
-    return buildFailureResult(
-      `WARNING: JWT authorizer ${authorizer.name} not found`,
-    )
+    return buildFailureResult(`JWT authorizer ${authorizer.name} not found`)
   }
 
   if (!httpApiAuthorizer.identitySource) {
     return buildFailureResult(
-      `WARNING: JWT authorizer ${authorizer.name} missing identity source`,
+      `JWT authorizer ${authorizer.name} missing identity source`,
     )
   }
 
   if (!httpApiAuthorizer.issuerUrl) {
     return buildFailureResult(
-      `WARNING: JWT authorizer ${authorizer.name} missing issuer url`,
+      `JWT authorizer ${authorizer.name} missing issuer url`,
     )
   }
 
   if (!httpApiAuthorizer.audience || httpApiAuthorizer.audience.length === 0) {
     return buildFailureResult(
-      `WARNING: JWT authorizer ${authorizer.name} missing audience`,
+      `JWT authorizer ${authorizer.name} missing audience`,
     )
   }
 

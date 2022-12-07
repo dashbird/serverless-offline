@@ -1,16 +1,18 @@
 // based on:
 // https://github.com/ajmath/serverless-offline-scheduler
 
+import { log } from '@serverless/utils/log.js'
 import nodeSchedule from 'node-schedule'
 import ScheduleEvent from './ScheduleEvent.js'
 import ScheduleEventDefinition from './ScheduleEventDefinition.js'
 
-// const CRON_LENGTH_WITH_YEAR = 6
+const CRON_LENGTH_WITH_YEAR = 6
 
 const { stringify } = JSON
 
 export default class Schedule {
   #lambda = null
+
   #region = null
 
   constructor(lambda, region) {
@@ -18,47 +20,60 @@ export default class Schedule {
     this.#region = region
   }
 
-  _scheduleEvent(functionKey, scheduleEvent) {
+  #scheduleEvent(functionKey, scheduleEvent) {
     const { enabled, input, rate } = scheduleEvent
 
     if (!enabled) {
-      console.log(`Scheduling [${functionKey}] cron: disabled`)
+      log.notice(`Scheduling [${functionKey}] cron: disabled`)
 
       return
     }
 
-    const cron = this._convertExpressionToCron(rate)
-    console.log(
-      `Scheduling [${functionKey}] cron: [${cron}] input: ${stringify(input)}`,
-    )
+    // Convert string rate to array to support Serverless v2.57.0 and lower.
+    let rates = rate
+    if (typeof rate === 'string') {
+      rates = [rate]
+    }
 
-    nodeSchedule.scheduleJob(cron, async () => {
-      try {
-        const lambdaFunction = this.#lambda.get(functionKey)
+    rates.forEach((entry) => {
+      const cron = this.#convertExpressionToCron(entry)
 
-        const event = input ?? new ScheduleEvent(this.#region)
-        lambdaFunction.setEvent(event)
+      log.notice(
+        `Scheduling [${functionKey}] cron: [${cron}]${
+          input ? ` input: ${stringify(input)}` : ''
+        }`,
+      )
 
-        /* const result = */ await lambdaFunction.runHandler()
+      nodeSchedule.scheduleJob(cron, async () => {
+        try {
+          const lambdaFunction = this.#lambda.get(functionKey)
 
-        console.log(`Succesfully invoked scheduled function: [${functionKey}]`)
-      } catch (err) {
-        console.log(
-          `Failed to execute scheduled function: [${functionKey}] Error: ${err}`,
-        )
-      }
+          const event = input ?? new ScheduleEvent(this.#region)
+          lambdaFunction.setEvent(event)
+
+          /* const result = */ await lambdaFunction.runHandler()
+
+          log.notice(
+            `Successfully invoked scheduled function: [${functionKey}]`,
+          )
+        } catch (err) {
+          log.error(
+            `Failed to execute scheduled function: [${functionKey}] Error: ${err}`,
+          )
+        }
+      })
     })
   }
 
-  // _convertCronSyntax(cronString) {
-  //   if (cronString.split(' ').length < CRON_LENGTH_WITH_YEAR) {
-  //     return cronString
-  //   }
-  //
-  //   return cronString.replace(/\s\S+$/, '')
-  // }
+  #convertCronSyntax(cronString) {
+    if (cronString.split(' ').length < CRON_LENGTH_WITH_YEAR) {
+      return cronString
+    }
 
-  _convertRateToCron(rate) {
+    return cronString.replace(/\s\S+$/, '')
+  }
+
+  #convertRateToCron(rate) {
     const [number, unit] = rate.split(' ')
 
     switch (unit) {
@@ -75,44 +90,42 @@ export default class Schedule {
         return `0 0 */${number} * *`
 
       default:
-        console.log(
-          `scheduler: Invalid rate syntax '${rate}', will not schedule`,
-        )
+        log.error(`scheduler: Invalid rate syntax '${rate}', will not schedule`)
+
         return null
     }
   }
 
-  _convertExpressionToCron(scheduleEvent) {
+  #convertExpressionToCron(scheduleEvent) {
     const params = scheduleEvent
       .replace('rate(', '')
       .replace('cron(', '')
       .replace(')', '')
 
     if (scheduleEvent.startsWith('cron(')) {
-      console.log('schedule rate "cron" not yet supported!')
-      // return this._convertCronSyntax(params)
+      return this.#convertCronSyntax(params)
     }
 
     if (scheduleEvent.startsWith('rate(')) {
-      return this._convertRateToCron(params)
+      return this.#convertRateToCron(params)
     }
 
-    console.log('scheduler: invalid, schedule syntax')
+    log.error('scheduler: invalid, schedule syntax')
 
     return undefined
   }
 
-  _create(functionKey, rawScheduleEventDefinition) {
+  #create(functionKey, rawScheduleEventDefinition) {
     const scheduleEvent = new ScheduleEventDefinition(
       rawScheduleEventDefinition,
     )
 
-    this._scheduleEvent(functionKey, scheduleEvent)
+    this.#scheduleEvent(functionKey, scheduleEvent)
   }
 
   create(events) {
     events.forEach(({ functionKey, schedule }) => {
-      this._create(functionKey, schedule)
+      this.#create(functionKey, schedule)
     })
   }
 }

@@ -1,121 +1,119 @@
-import updateNotifier from 'update-notifier'
-import debugLog from './debugLog.js'
-import serverlessLog, { logWarning, setLog } from './serverlessLog.js'
-import { satisfiesVersionRange } from './utils/index.js'
+import process, { exit } from 'node:process'
+import { log } from '@serverless/utils/log.js'
 import {
   commandOptions,
   CUSTOM_OPTION,
   defaultOptions,
   SERVER_SHUTDOWN_TIMEOUT,
 } from './config/index.js'
-import pkg from '../package.json'
+import { gray } from './config/colors.js'
 
 export default class ServerlessOffline {
+  #alb = null
+
   #cliOptions = null
+
   #http = null
-  #options = null
-  #schedule = null
-  #webSocket = null
+
   #lambda = null
+
+  #options = null
+
+  #schedule = null
+
   #serverless = null
+
+  #webSocket = null
+
+  commands = {
+    offline: {
+      // add start nested options
+      commands: {
+        functionsUpdated: {
+          lifecycleEvents: ['cleanup'],
+          type: 'entrypoint',
+        },
+        start: {
+          lifecycleEvents: ['init', 'ready', 'end'],
+          options: commandOptions,
+          usage:
+            'Simulates API Gateway to call your lambda functions offline using backward compatible initialization.',
+        },
+      },
+      lifecycleEvents: ['start'],
+      options: commandOptions,
+      usage: 'Simulates API Gateway to call your lambda functions offline.',
+    },
+  }
+
+  hooks = {
+    'offline:functionsUpdated:cleanup': this.#cleanupFunctions.bind(this),
+    'offline:start': this.#startWithExplicitEnd.bind(this),
+    'offline:start:end': this.end.bind(this),
+    'offline:start:init': this.start.bind(this),
+    'offline:start:ready': this.#ready.bind(this),
+  }
 
   constructor(serverless, cliOptions) {
     this.#cliOptions = cliOptions
     this.#serverless = serverless
-
-    setLog((...args) => serverless.cli.log(...args))
-
-    this.commands = {
-      offline: {
-        // add start nested options
-        commands: {
-          start: {
-            lifecycleEvents: ['init', 'ready', 'end'],
-            options: commandOptions,
-            usage:
-              'Simulates API Gateway to call your lambda functions offline using backward compatible initialization.',
-          },
-        },
-        lifecycleEvents: ['start'],
-        options: commandOptions,
-        usage: 'Simulates API Gateway to call your lambda functions offline.',
-      },
-    }
-
-    this.hooks = {
-      'offline:start:init': this.start.bind(this),
-      'offline:start:ready': this.ready.bind(this),
-      'offline:start': this._startWithExplicitEnd.bind(this),
-      'offline:start:end': this.end.bind(this),
-    }
-  }
-
-  _printBlankLine() {
-    if (process.env.NODE_ENV !== 'test') {
-      console.log()
-    }
   }
 
   // Entry point for the plugin (sls offline) when running 'sls offline start'
   async start() {
-    // Put here so available everywhere, not just in handlers
-    process.env.IS_OFFLINE = true
-
-    // check if update is available
-    updateNotifier({ pkg }).notify()
-
-    this._verifyServerlessVersionCompatibility()
-
-    this._mergeOptions()
+    this.#mergeOptions()
 
     const {
+      albEvents,
       httpEvents,
+      httpApiEvents,
       lambdas,
       scheduleEvents,
       webSocketEvents,
-    } = this._getEvents()
+    } = this.#getEvents()
 
-    // if (lambdas.length > 0) {
-    await this._createLambda(lambdas)
-    // }
+    if (lambdas.length > 0) {
+      await this.#createLambda(lambdas)
+    }
 
     const eventModules = []
 
+    if (albEvents.length > 0) {
+      eventModules.push(this.#createAlb(albEvents))
+    }
+
     const forceEvents = this.#options.resourceRoutes && this.#options.resourceRoutes.force
-    if (httpEvents.length > 0 || forceEvents) {
-      eventModules.push(this._createHttp(httpEvents))
+    if (forceEvents || httpApiEvents.length > 0 || httpEvents.length > 0) {
+      eventModules.push(this.#createHttp([...httpApiEvents, ...httpEvents]))
     }
 
     if (scheduleEvents.length > 0) {
-      eventModules.push(this._createSchedule(scheduleEvents))
+      eventModules.push(this.#createSchedule(scheduleEvents))
     }
 
     if (webSocketEvents.length > 0) {
-      eventModules.push(this._createWebSocket(webSocketEvents))
+      eventModules.push(this.#createWebSocket(webSocketEvents))
     }
 
     await Promise.all(eventModules)
   }
 
-  async ready() {
-    if (process.env.NODE_ENV !== 'test') {
-      await this._listenForTermination()
-    }
+  async #ready() {
+    await this.#listenForTermination()
   }
 
   async end(skipExit) {
-    // TEMP FIXME
-    if (process.env.NODE_ENV === 'test' && skipExit === undefined) {
-      return
-    }
-
-    serverlessLog('Halting offline server')
+    log.info('Halting offline server')
 
     const eventModules = []
 
     if (this.#lambda) {
       eventModules.push(this.#lambda.cleanup())
       eventModules.push(this.#lambda.stop(SERVER_SHUTDOWN_TIMEOUT))
+    }
+
+    if (this.#alb) {
+      eventModules.push(this.#alb.stop(SERVER_SHUTDOWN_TIMEOUT))
     }
 
     if (this.#http) {
@@ -133,23 +131,30 @@ export default class ServerlessOffline {
     await Promise.all(eventModules)
 
     if (!skipExit) {
-      process.exit(0)
+      exit(0)
+    }
+  }
+
+  async #cleanupFunctions() {
+    if (this.#lambda) {
+      log.debug('Forcing cleanup of Lambda functions')
+      await this.#lambda.cleanup()
     }
   }
 
   /**
-   * Entry point for the plugin (sls offline) when running 'sls offline'
+   * Entry point for the plugin (serverless offline) when running 'serverless offline'
    * The call to this.end() would terminate the process before 'offline:start:end' could be consumed
-   * by downstream plugins. When running sls offline that can be expected, but docs say that
-   * 'sls offline start' will provide the init and end hooks for other plugins to consume
+   * by downstream plugins. When running serverless offline that can be expected, but docs say that
+   * 'serverless offline start' will provide the init and end hooks for other plugins to consume
    * */
-  async _startWithExplicitEnd() {
+  async #startWithExplicitEnd() {
     await this.start()
-    await this.ready()
-    this.end()
+    await this.#ready()
+    await this.end()
   }
 
-  async _listenForTermination() {
+  async #listenForTermination() {
     const command = await new Promise((resolve) => {
       process
         // SIGINT will be usually sent when user presses ctrl+c
@@ -160,10 +165,10 @@ export default class ServerlessOffline {
         .on('SIGTERM', () => resolve('SIGTERM'))
     })
 
-    serverlessLog(`Got ${command} signal. Offline Halting...`)
+    log.info(`Got ${command} signal. Offline Halting...`)
   }
 
-  async _createLambda(lambdas, skipStart) {
+  async #createLambda(lambdas, skipStart) {
     const { default: Lambda } = await import('./lambda/index.js')
 
     this.#lambda = new Lambda(this.#serverless, this.#options)
@@ -175,12 +180,12 @@ export default class ServerlessOffline {
     }
   }
 
-  async _createHttp(events, skipStart) {
+  async #createHttp(events, skipStart) {
     const { default: Http } = await import('./events/http/index.js')
 
     this.#http = new Http(this.#serverless, this.#options, this.#lambda)
 
-    await this.#http.registerPlugins()
+    await this.#http.createServer()
 
     this.#http.create(events)
 
@@ -197,7 +202,7 @@ export default class ServerlessOffline {
     }
   }
 
-  async _createSchedule(events) {
+  async #createSchedule(events) {
     const { default: Schedule } = await import('./events/schedule/index.js')
 
     this.#schedule = new Schedule(
@@ -208,7 +213,7 @@ export default class ServerlessOffline {
     this.#schedule.create(events)
   }
 
-  async _createWebSocket(events) {
+  async #createWebSocket(events) {
     const { default: WebSocket } = await import('./events/websocket/index.js')
 
     this.#webSocket = new WebSocket(
@@ -217,12 +222,28 @@ export default class ServerlessOffline {
       this.#lambda,
     )
 
+    await this.#webSocket.createServer()
+
     this.#webSocket.create(events)
 
-    return this.#webSocket.start()
+    await this.#webSocket.start()
   }
 
-  _mergeOptions() {
+  async #createAlb(events, skipStart) {
+    const { default: Alb } = await import('./events/alb/index.js')
+
+    this.#alb = new Alb(this.#serverless, this.#options, this.#lambda)
+
+    await this.#alb.createServer()
+
+    this.#alb.create(events)
+
+    if (!skipStart) {
+      await this.#alb.start()
+    }
+  }
+
+  #mergeOptions() {
     const {
       service: { custom = {}, provider },
     } = this.#serverless
@@ -248,92 +269,125 @@ export default class ServerlessOffline {
       .replace(/\s/g, '')
       .split(',')
 
-    if (this.#options.corsDisallowCredentials) {
-      this.#options.corsAllowCredentials = false
-    }
-
     this.#options.corsConfig = {
-      credentials: this.#options.corsAllowCredentials,
+      credentials: !this.#options.corsDisallowCredentials,
       exposedHeaders: this.#options.corsExposedHeaders,
       headers: this.#options.corsAllowHeaders,
       origin: this.#options.corsAllowOrigin,
     }
 
-    serverlessLog(`Starting Offline: ${provider.stage}/${provider.region}.`)
-    debugLog('options:', this.#options)
+    log.notice()
+    log.notice(
+      `Starting Offline at stage ${
+        this.#options.stage || provider.stage
+      } ${gray(`(${this.#options.region || provider.region})`)}`,
+    )
+    log.notice()
+    log.debug('options:', this.#options)
   }
 
-  _getEvents() {
+  #getEvents() {
     const { service } = this.#serverless
 
+    const albEvents = []
     const httpEvents = []
+    const httpApiEvents = []
     const lambdas = []
     const scheduleEvents = []
     const webSocketEvents = []
 
     const functionKeys = service.getAllFunctions()
 
-    let hasPrivateHttpEvent = false
-
     functionKeys.forEach((functionKey) => {
       const functionDefinition = service.getFunction(functionKey)
 
-      lambdas.push({ functionKey, functionDefinition })
+      lambdas.push({
+        functionDefinition,
+        functionKey,
+      })
 
-      const events = service.getAllEventsInFunction(functionKey) || []
+      const events = service.getAllEventsInFunction(functionKey) ?? []
 
       events.forEach((event) => {
-        const { http, httpApi, schedule, websocket } = event
+        const { alb, http, httpApi, schedule, websocket } = event
 
-        if ((http || httpApi) && functionDefinition.handler) {
+        if (alb) {
+          albEvents.push({
+            alb,
+            functionKey,
+            handler: functionDefinition.handler,
+          })
+        }
+
+        if (http && functionDefinition.handler) {
           const httpEvent = {
             functionKey,
             handler: functionDefinition.handler,
-            http: http || httpApi,
+            http,
           }
 
-          if (httpApi) {
-            // Ensure definitions for 'httpApi' events are objects so that they can be marked
-            // with an 'isHttpApi' property (they are handled differently to 'http' events)
-            if (typeof httpEvent.http === 'string') {
-              httpEvent.http = {
-                routeKey: httpEvent.http === '*' ? '$default' : httpEvent.http,
-              }
-            } else if (typeof httpEvent.http === 'object') {
-              if (!httpEvent.http.method) {
-                logWarning(
-                  `Event definition is missing a method for function "${functionKey}"`,
-                )
-                httpEvent.http.method = ''
-              }
-              const resolvedMethod =
-                httpEvent.http.method === '*'
-                  ? 'ANY'
-                  : httpEvent.http.method.toUpperCase()
-              httpEvent.http.routeKey = `${resolvedMethod} ${httpEvent.http.path}`
-              // Clear these properties to avoid confusion (they will be derived from the routeKey
-              // when needed later)
-              delete httpEvent.http.method
-              delete httpEvent.http.path
-            } else {
-              logWarning(
-                `Event definition must be a string or object but received ${typeof httpEvent.http} for function "${functionKey}"`,
-              )
-              httpEvent.http.routeKey = ''
-            }
+          httpEvents.push(httpEvent)
+        }
 
-            httpEvent.http.isHttpApi = true
-            httpEvent.http.payload =
+        if (httpApi && functionDefinition.handler) {
+          const httpApiEvent = {
+            functionKey,
+            handler: functionDefinition.handler,
+            http: httpApi,
+          }
+
+          // Ensure definitions for 'httpApi' events are objects so that they can be marked
+          // with an 'isHttpApi' property (they are handled differently to 'http' events)
+          if (typeof httpApiEvent.http === 'string') {
+            httpApiEvent.http = {
+              routeKey:
+                httpApiEvent.http === '*' ? '$default' : httpApiEvent.http,
+            }
+          } else if (typeof httpApiEvent.http === 'object') {
+            if (!httpApiEvent.http.method) {
+              log.warning(
+                `Event definition is missing a method for function "${functionKey}"`,
+              )
+              httpApiEvent.http.method = ''
+            }
+            if (
+              httpApiEvent.http.method === '*' &&
+              httpApiEvent.http.path === '*'
+            ) {
+              httpApiEvent.http.routeKey = '$default'
+            } else {
+              const resolvedMethod =
+                httpApiEvent.http.method === '*'
+                  ? 'ANY'
+                  : httpApiEvent.http.method.toUpperCase()
+              httpApiEvent.http.routeKey = `${resolvedMethod} ${httpApiEvent.http.path}`
+            }
+            // Clear these properties to avoid confusion (they will be derived from the routeKey
+            // when needed later)
+            delete httpApiEvent.http.method
+            delete httpApiEvent.http.path
+          } else {
+            log.warning(
+              `Event definition must be a string or object but received ${typeof httpApiEvent.http} for function "${functionKey}"`,
+            )
+            httpApiEvent.http.routeKey = ''
+          }
+
+          httpApiEvent.http.isHttpApi = true
+
+          if (
+            functionDefinition.httpApi &&
+            functionDefinition.httpApi.payload
+          ) {
+            httpApiEvent.http.payload = functionDefinition.httpApi.payload
+          } else {
+            httpApiEvent.http.payload =
               service.provider.httpApi && service.provider.httpApi.payload
                 ? service.provider.httpApi.payload
                 : '2.0'
           }
 
-          if (http && http.private) {
-            hasPrivateHttpEvent = true
-          }
-
-          httpEvents.push(httpEvent)
+          httpApiEvents.push(httpApiEvent)
         }
 
         if (schedule) {
@@ -352,20 +406,9 @@ export default class ServerlessOffline {
       })
     })
 
-    // for simple API Key authentication model
-    if (hasPrivateHttpEvent) {
-      serverlessLog(`Key with token: ${this.#options.apiKey}`)
-
-      if (this.#options.noAuth) {
-        serverlessLog(
-          'Authorizers are turned off. You do not need to use x-api-key header.',
-        )
-      } else {
-        serverlessLog('Remember to use x-api-key on the request headers')
-      }
-    }
-
     return {
+      albEvents,
+      httpApiEvents,
       httpEvents,
       lambdas,
       scheduleEvents,
@@ -373,28 +416,29 @@ export default class ServerlessOffline {
     }
   }
 
-  // TEMP FIXME quick fix to expose gateway server for testing, look for better solution
-  getApiGatewayServer() {
-    return this.#http.getServer()
-  }
+  // TODO FIXME
+  // TEMP quick fix to expose for testing, look for better solution
+  internals() {
+    return {
+      createHttp: (events, skipStart) => {
+        return this.#createHttp(events, skipStart)
+      },
 
-  // TODO: missing tests
-  _verifyServerlessVersionCompatibility() {
-    const currentVersion = this.#serverless.version
-    const requiredVersionRange = pkg.peerDependencies.serverless
+      createLambda: (lambdas, skipStart) => {
+        return this.#createLambda(lambdas, skipStart)
+      },
 
-    const versionIsSatisfied = satisfiesVersionRange(
-      currentVersion,
-      requiredVersionRange,
-    )
+      getApiGatewayServer: () => {
+        return this.#http.getServer()
+      },
 
-    if (!versionIsSatisfied) {
-      logWarning(
-        `serverless-offline requires serverless version ${requiredVersionRange} but found version ${currentVersion}.
-         Be aware that functionality might be limited or contains bugs.
-         To avoid any issues update serverless to a later version.
-        `,
-      )
+      getEvents: () => {
+        return this.#getEvents()
+      },
+
+      mergeOptions: () => {
+        this.#mergeOptions()
+      },
     }
   }
 }

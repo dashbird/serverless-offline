@@ -1,4 +1,4 @@
-import serverlessLog from '../../../serverlessLog.js'
+import { log } from '@serverless/utils/log.js'
 
 export default class InvocationsController {
   #lambda = null
@@ -11,7 +11,7 @@ export default class InvocationsController {
     // Reject gracefully if functionName does not exist
     const functionNames = this.#lambda.listFunctionNames()
     if (functionNames.length === 0 || !functionNames.includes(functionName)) {
-      serverlessLog(
+      log.error(
         `Attempt to invoke function '${functionName}' failed. Function does not exists.`,
       )
       // Conforms to the actual response from AWS Lambda when invoking a non-existent
@@ -33,12 +33,7 @@ export default class InvocationsController {
 
     if (invocationType === 'Event') {
       // don't await result!
-      lambdaFunction.runHandler().catch((err) => {
-        // TODO handle error
-        console.log(err)
-        throw err
-      })
-
+      lambdaFunction.runHandler()
       return {
         Payload: '',
         StatusCode: 202,
@@ -51,10 +46,9 @@ export default class InvocationsController {
       try {
         result = await lambdaFunction.runHandler()
       } catch (err) {
-        serverlessLog(
-          `Unhandled Lambda Error during invoke of '${functionName}'`,
+        log.error(
+          `Unhandled Lambda Error during invoke of '${functionName}': ${err}`,
         )
-        console.log(err)
         // In most circumstances this is the correct error type/structure.
         // The API returns a StreamingBody with status code of 200
         // that eventually spits out the error and stack trace.
@@ -62,18 +56,26 @@ export default class InvocationsController {
         // the whole error stream, however this has not been validated.
         return {
           Payload: {
-            errorType: 'Error',
             errorMessage: err.message,
+            errorType: 'Error',
             trace: err.stack.split('\n'),
           },
-          UnhandledError: true,
           StatusCode: 200,
+          UnhandledError: true,
         }
         // TODO: Additional pre and post-handler validation can expose
         // the following error types:
         // RequestTooLargeException, InvalidParameterValueException,
         // and whatever response is thrown when the response is too large.
       }
+
+      // Checking if the result of the Lambda Invoke is a primitive string to wrap it. this is for future post-processing such as Step Functions Tasks
+      if (result) {
+        if (typeof result === 'string') {
+          result = `"${result}"`
+        }
+      }
+
       // result is actually the Payload.
       // So return in a standard structure so Hapi can
       // respond with the correct status codes
@@ -85,7 +87,8 @@ export default class InvocationsController {
 
     // TODO FIXME
     const errMsg = `invocationType: '${invocationType}' not supported by serverless-offline`
-    console.log(errMsg)
+
+    log.error(errMsg)
 
     return {
       FunctionError: 'InvalidParameterValueException',

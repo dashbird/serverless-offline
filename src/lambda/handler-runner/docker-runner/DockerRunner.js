@@ -3,6 +3,7 @@ import { checkDockerDaemon } from '../../../utils/index.js'
 
 export default class DockerRunner {
   #codeDir = null
+
   #container = null
 
   constructor(funOptions, env, dockerOptions) {
@@ -17,6 +18,7 @@ export default class DockerRunner {
     } = funOptions
 
     this.#codeDir = codeDir
+
     if (
       dockerOptions.hostServicePath &&
       this.#codeDir.startsWith(servicePath)
@@ -26,6 +28,7 @@ export default class DockerRunner {
         dockerOptions.hostServicePath,
       )
     }
+
     this.#container = new DockerContainer(
       env,
       functionKey,

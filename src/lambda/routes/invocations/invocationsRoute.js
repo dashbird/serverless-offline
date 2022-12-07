@@ -1,5 +1,4 @@
-import { Buffer } from 'buffer'
-import { Headers } from 'node-fetch'
+import { Buffer } from 'node:buffer'
 import InvocationsController from './InvocationsController.js'
 
 const { parse } = JSON
@@ -16,10 +15,9 @@ export default function invocationsRoute(lambda, options) {
         payload,
       } = request
 
-      const _headers = new Headers(headers)
-
-      const clientContextHeader = _headers.get('x-amz-client-context')
-      const invocationType = _headers.get('x-amz-invocation-type')
+      const parsedHeaders = new Headers(headers)
+      const clientContextHeader = parsedHeaders.get('x-amz-client-context')
+      const invocationType = parsedHeaders.get('x-amz-invocation-type')
 
       // default is undefined
       let clientContext
@@ -45,7 +43,8 @@ export default function invocationsRoute(lambda, options) {
       let statusCode = 200
       let functionError = null
       if (invokeResults) {
-        resultPayload = invokeResults.Payload || ''
+        const isPayloadDefined = invokeResults.Payload !== undefined
+        resultPayload = isPayloadDefined ? invokeResults.Payload : ''
         statusCode = invokeResults.StatusCode || 200
         functionError = invokeResults.FunctionError || null
       }
@@ -62,13 +61,15 @@ export default function invocationsRoute(lambda, options) {
     },
     method: 'POST',
     options: {
+      cors: options.corsConfig,
       payload: {
         // allow: ['binary/octet-stream'],
         defaultContentType: 'binary/octet-stream',
+        // Set maximum size to 6 MB to match maximum invocation payload size in synchronous responses
+        maxBytes: 1024 * 1024 * 6,
         // request.payload will be a raw buffer
         parse: false,
       },
-      cors: options.corsConfig,
       tags: ['api'],
     },
     path: '/2015-03-31/functions/{functionName}/invocations',

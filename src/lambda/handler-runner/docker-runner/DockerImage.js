@@ -1,16 +1,20 @@
-import execa from 'execa'
+import { log } from '@serverless/utils/log.js'
+import { execa } from 'execa'
+// TODO FIXME eslint plugin import bug, or not supporting package.json "expprts" field?
+// eslint-disable-next-line import/no-unresolved
 import promiseMemoize from 'p-memoize'
-import debugLog from '../../../debugLog.js'
 
 export default class DockerImage {
   #imageNameTag = null
+
+  static #memoizedPull = promiseMemoize(DockerImage.#pullImage)
 
   constructor(imageNameTag) {
     this.#imageNameTag = imageNameTag
   }
 
-  static async _pullImage(imageNameTag) {
-    debugLog(`Downloading base Docker image... (${imageNameTag})`)
+  static async #pullImage(imageNameTag) {
+    log.debug(`Downloading base Docker image... (${imageNameTag})`)
 
     try {
       await execa('docker', [
@@ -19,14 +23,13 @@ export default class DockerImage {
         imageNameTag,
       ])
     } catch (err) {
-      console.error(err.stderr)
+      log.error(err.stderr)
+
       throw err
     }
   }
 
   async pull() {
-    return DockerImage._memoizedPull(this.#imageNameTag)
+    return DockerImage.#memoizedPull(this.#imageNameTag)
   }
 }
-
-DockerImage._memoizedPull = promiseMemoize(DockerImage._pullImage)
